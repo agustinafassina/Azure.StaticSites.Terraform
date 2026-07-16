@@ -13,17 +13,14 @@ override.tf.json
 *_override.tf
 *_override.tf.json
 
-# Backend config with secrets / environment-specific values (use *.hcl.example)
 backend.hcl
 **/backend.hcl
 
-# Sensitive / local variable files
 *.auto.tfvars
 *.auto.tfvars.json
 secrets.tfvars
 **/secrets.tfvars
 
-# IDE / OS
 .idea/
 .vscode/
 *.swp
@@ -31,7 +28,6 @@ secrets.tfvars
 .DS_Store
 Thumbs.db
 
-# Local env
 .env
 .env.*
 !.env.example
