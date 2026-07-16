@@ -6,6 +6,8 @@ Aligned with [Readme-Terraform.md](Readme-Terraform.md) (naming, modules, remote
 
 ## Architecture
 
+![Terraform multi-sitio · Azure Static Web Apps](diagram.jpeg)
+
 ```text
 Developer → git push → GitHub Actions
                          ├─ Stage 1: Terraform (SWA + DNS + custom domains)
