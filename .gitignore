@@ -1,0 +1,37 @@
+# Terraform
+.terraform/
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+*.tfplan.*
+tfplan-*
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Backend config with secrets / environment-specific values (use *.hcl.example)
+backend.hcl
+**/backend.hcl
+
+# Sensitive / local variable files
+*.auto.tfvars
+*.auto.tfvars.json
+secrets.tfvars
+**/secrets.tfvars
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Local env
+.env
+.env.*
+!.env.example

@@ -1,17 +1,18 @@
 # Azure Static Sites · Terraform
+Multi-site Terraform stack for **Azure Static Web Apps** (Free tier), with Azure DNS, remote state, **workspaces** for environments, and GitHub Actions content deploy via deployment tokens.
 
-Multi-site, multi-environment Terraform stack for **Azure Static Web Apps** (Free tier), with Azure DNS, remote state, and GitHub Actions content deploy via deployment tokens.
+IaC lives under [`infrastructure/`](infrastructure/) so modules can be reused across implementations. Site content stays in [`sites/`](sites/).
 
-Aligned with [Readme-Terraform.md](Readme-Terraform.md) (naming, modules, remote state, pinned providers, sensitive outputs, plan-before-apply).
+Aligned with [docs/Readme-Terraform.md](docs/Readme-Terraform.md) (naming, modules, remote state, pinned providers, sensitive outputs, plan-before-apply).
 
 ## Architecture
-
-![Terraform multi-sitio · Azure Static Web Apps](diagram.jpeg)
+![Terraform multi-sitio · Azure Static Web Apps](docs/diagram.jpeg)
 
 ```text
 Developer → git push → GitHub Actions
                          ├─ Stage 1: Terraform (SWA + DNS + custom domains)
                          │            └─ Azure Storage state + blob lock
+                         │            └─ workspace = dev|staging|prod
                          │            └─ outputs deployment_token
                          └─ Stage 2: Build & Deploy (token → SWA)
                                       └─ CDN + managed SSL
@@ -20,45 +21,50 @@ Developer → git push → GitHub Actions
 | Concept | Choice |
 |---------|--------|
 | Sites | `for_each` over a `sites` map — **1 SWA per site** |
-| State | **One state file per environment**: `{project}/{environment}/terraform.tfstate` |
+| Environments | **Terraform workspaces** (`dev` / `staging` / `prod`) + matching `*.tfvars` |
+| State | One blob per workspace under `env:/<workspace>/tf-{project}/terraform.tfstate` |
 | Resource group | Shared per environment by default |
 | DNS | Shared zone; create once (prod) or pass existing zone |
 | Content | Deployed with GHA + `deployment_token` (not GitHub App linking) |
 
 ## Repository layout
-
 ```text
-├── modules/
-│   ├── static_web_app/     # SWA + custom domains + DNS records
-│   └── dns_zone/           # Azure DNS zone (optional create)
-├── environments/
-│   ├── dev|staging|prod/   # Separate roots + separate state
-├── sites/                  # Example static content per site
-├── scripts/                # Backend bootstrap (bash + PowerShell)
-├── .github/workflows/      # Infra + content pipelines
-├── Makefile
-├── .terraform-version
-└── .pre-commit-config.yaml
+├── infrastructure/             # All Terraform (reusable package)
+│   ├── modules/
+│   │   ├── static_web_app/
+│   │   └── dns_zone/
+│   ├── scripts/                # Backend bootstrap
+│   ├── main.tf / variables.tf / outputs.tf / …
+│   ├── dev.tfvars / staging.tfvars / prod.tfvars
+│   └── backend.hcl.example
+├── sites/                      # Static content per site
+├── docs/                       # Architecture diagram + Terraform practices
+├── .github/workflows/
+├── Makefile                    # Runs terraform inside infrastructure/
+└── README.md
 ```
 
 ## Prerequisites
-
-- Terraform `1.15.x` (see [`.terraform-version`](.terraform-version))
+- Terraform `1.15.x` (see [`infrastructure/.terraform-version`](infrastructure/.terraform-version))
 - Azure CLI (`az login`) with rights to create RG / SWA / DNS / Storage
 - GitHub repo + Actions enabled
 - A domain you can delegate to Azure DNS (or an existing Azure DNS zone)
 
 ## Naming convention
+Pattern for workload resources: `tf-{environment}-{project_name}-{resource}`  
+Pattern for shared backend (no env): `tf-{project_name}-{resource}`
 
 | Resource | Pattern | Example |
 |----------|---------|---------|
-| Shared RG | `rg-{project}-{environment}` | `rg-staticsites-dev` |
-| Static Web App | `{project}-{environment}-{site}` | `staticsites-dev-site1` |
-| Per-site RG (optional) | `rg-{swa-name}` | `rg-staticsites-dev-site1` |
+| Backend RG | `tf-{project}-tfstate-rg` | `tf-staticsites-tfstate-rg` |
+| Backend storage | `tf{project}tfstate` (no hyphens; Azure SA limit) | `tfstaticsitestfstate` |
+| Shared RG | `tf-{env}-{project}-rg` | `tf-dev-staticsites-rg` |
+| Static Web App | `tf-{env}-{project}-swa-{site}` | `tf-dev-staticsites-swa-site1` |
+| Per-site RG (optional) | `tf-{env}-{project}-rg-{site}` | `tf-dev-staticsites-rg-site1` |
 | Tags (required) | `environment`, `managed-by=terraform`, `project` | |
+| Workspace | must equal `environment` in the tfvars | `dev` + `dev.tfvars` |
 
 ## Free tier limits and Standard upgrade
-
 | Limit | Free | When to use Standard |
 |-------|------|----------------------|
 | Custom domains / SWA | **2** | Need 3+ domains on one app |
@@ -66,59 +72,50 @@ Developer → git push → GitHub Actions
 | SSL | Managed | Same |
 | Auth / SLA | Limited | Enterprise features |
 
-**How to scale a site to Standard:** in `terraform.tfvars` set `sku_tier = "Standard"` on that site object, then `make plan ENV=...` / `make apply ENV=...`. Terraform updates `sku_tier` / `sku_size` in place. Document billing impact before applying to prod.
+**How to scale a site to Standard:** in the env tfvars set `sku_tier = "Standard"` on that site, then `make plan ENV=...` / `make apply ENV=...`.
 
-Validation blocks reject Free + more than 2 `custom_domains`.
+Validation blocks reject Free + more than 2 `custom_domains`. Checks also fail if the active workspace does not match `var.environment`, or if you are on `default`.
 
 ## Bootstrap remote state (one-time)
 
-Azure Storage backend with blob lease locking:
-
 ```powershell
-.\scripts\bootstrap-backend.ps1 `
-  -ResourceGroup tfstate-rg `
-  -Location eastus2 `
-  -StorageAccount sttfstateproj001 `
-  -Container tfstate
+.\infrastructure\scripts\bootstrap-backend.ps1 -ProjectName staticsites -Location eastus2
 ```
 
 ```bash
-./scripts/bootstrap-backend.sh \
-  --resource-group tfstate-rg \
-  --location eastus2 \
-  --storage-account sttfstateproj001 \
-  --container tfstate
+./infrastructure/scripts/bootstrap-backend.sh --project-name staticsites --location eastus2
 ```
 
-Then per environment:
+Creates:
+- RG `tf-staticsites-tfstate-rg`
+- Storage `tfstaticsitestfstate` (Azure no permite guiones en storage accounts)
+- Container `tfstate`
 
 ```bash
-cp environments/dev/backend.hcl.example environments/dev/backend.hcl
-# edit resource_group_name, storage_account_name, key
+cp infrastructure/backend.hcl.example infrastructure/backend.hcl
+# edit if needed; key = tf-staticsites/terraform.tfstate
 ```
-
-Key format: `{project}/{environment}/terraform.tfstate` (e.g. `staticsites/dev/terraform.tfstate`).
 
 ## Configure and apply
-
-1. Edit `environments/<env>/terraform.tfvars` — set `project_name`, `dns_zone_name`, and `sites`.
+1. Edit `infrastructure/dev.tfvars` (and staging/prod) — set `project_name`, `dns_zone_name`, and `sites`.
 2. Replace placeholder domains (`example.com`) with yours.
-3. Prefer **one** environment (usually prod) with `create_dns_zone = true`; others set `create_dns_zone = false` and `existing_dns_zone_resource_group_name`.
-4. Run:
+3. Prefer **one** workspace (usually prod) with `create_dns_zone = true`; others set `create_dns_zone = false` and `existing_dns_zone_resource_group_name`.
+4. From repo root:
 
 ```bash
 make fmt
-make init ENV=dev
-make plan ENV=dev          # review environments/dev/tfplan
+make init
+make workspace ENV=dev
+make plan ENV=dev          # review infrastructure/tfplan-dev
 make apply ENV=dev         # applies the saved plan only
 ```
 
-After apply, delegate registrar NS to `terraform output dns_name_servers` (when this stack created the zone).
+After apply, delegate registrar NS to `terraform output dns_name_servers` (from `infrastructure/`, when this stack created the zone).
 
 ### Export deployment tokens to GitHub
-
 ```bash
-cd environments/dev
+cd infrastructure
+terraform workspace select dev
 terraform output -json deployment_tokens
 ```
 
@@ -132,9 +129,8 @@ Create repository secrets (never commit these):
 | `TF_BACKEND_RESOURCE_GROUP` / `TF_BACKEND_STORAGE_ACCOUNT` | Backend bootstrap values |
 
 ## Add a new site
-
 1. Add a folder under `sites/<key>/` with at least `index.html` (and optional `staticwebapp.config.json`).
-2. Add an entry to `sites` in the environment `terraform.tfvars`:
+2. Add an entry to `sites` in each relevant `infrastructure/*.tfvars`:
 
 ```hcl
 sites = {
@@ -153,51 +149,36 @@ sites = {
 5. Store the new `deployment_token` in GitHub Secrets.
 
 ## Content vs infrastructure
-
-- Changes under `modules/` or `environments/` → Terraform stage.
+- Changes under `infrastructure/` → Terraform stage.
 - Changes under `sites/<name>/` → deploy job for that site only.
 - You can update HTML/CSS/JS without re-running Terraform once the SWA exists.
 
 ## Optional Azure Functions API
-
 Set `api_location` on the site (e.g. `"api"`) and add Functions under that path. See [sites/README.md](sites/README.md). Keep APIs lightweight on Free.
 
 ## Apex domains
-
 Subdomains use CNAME → `default_host_name` + `cname-delegation`.  
-Apex (`example.com`) uses `dns-txt-token` + `asuid` TXT. You may still need an ALIAS/A record to the SWA hostname (Azure DNS alias) — see [modules/static_web_app/README.md](modules/static_web_app/README.md).
+Apex (`example.com`) uses `dns-txt-token` + `asuid` TXT. You may still need an ALIAS/A record to the SWA hostname (Azure DNS alias) — see [infrastructure/modules/static_web_app/README.md](infrastructure/modules/static_web_app/README.md).
 
 ## Makefile targets
-
 | Target | Description |
 |--------|-------------|
-| `make fmt` | `terraform fmt -recursive` |
-| `make init ENV=dev` | Init with `backend.hcl` if present |
-| `make plan ENV=dev` | Plan → `tfplan` (review before apply) |
-| `make apply ENV=dev` | Apply saved `tfplan` only |
+| `make fmt` | `terraform fmt -recursive` in `infrastructure/` |
+| `make init` | Init with `infrastructure/backend.hcl` if present |
+| `make workspace ENV=dev` | Create/select workspace |
+| `make plan ENV=dev` | Plan with `dev.tfvars` → `infrastructure/tfplan-dev` |
+| `make apply ENV=dev` | Apply saved plan only |
 | `make destroy ENV=dev` | Interactive destroy (no auto-approve) |
 
-## Pre-commit
-
-```bash
-pre-commit install
-pre-commit run --all-files
-```
-
-Hooks: `terraform_fmt`, `terraform_validate`, `terraform_tflint`, `gitleaks`.
-
 ## Security notes
-
 - Mark sensitive outputs (`deployment_tokens`, validation tokens) — do not print in CI logs.
 - Do not commit `backend.hcl`, `*.auto.tfvars`, or state files (see [`.gitignore`](.gitignore)).
 - Prefer OIDC federated credentials over long-lived client secrets for Actions.
 - Least-privilege: separate SP for Terraform vs content deploy tokens.
 
 ## Modules
-
-- [modules/dns_zone](modules/dns_zone/README.md)
-- [modules/static_web_app](modules/static_web_app/README.md)
+- [infrastructure/modules/dns_zone](infrastructure/modules/dns_zone/README.md)
+- [infrastructure/modules/static_web_app](infrastructure/modules/static_web_app/README.md)
 
 ## Terraform best practices checklist
-
-See [Readme-Terraform.md](Readme-Terraform.md) for the full list. This repo implements: descriptive naming, `modules/` + `environments/`, remote state + lock, pinned providers / `.terraform-version`, documented variables/outputs, sensitive flags, fmt/validate/pre-commit, and plan file before apply.
+See [docs/Readme-Terraform.md](docs/Readme-Terraform.md) for the full list. This repo implements: descriptive naming, isolated `infrastructure/modules/` + workspaces, remote state + lock, pinned providers / `.terraform-version`, documented variables/outputs, sensitive flags, fmt/validate, and plan file before apply.
