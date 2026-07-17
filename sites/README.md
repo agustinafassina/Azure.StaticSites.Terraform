@@ -2,7 +2,7 @@
 Static site content deployed to Azure Static Web Apps via GitHub Actions.
 
 Infrastructure (SWA resources, DNS, domains) lives in [`../infrastructure/`](../infrastructure/).  
-This folder is only the **content** layer.
+This folder is only the **content** layer. See [Azure architecture](../docs/architecture-azure.jpeg).
 
 ```text
 sites/

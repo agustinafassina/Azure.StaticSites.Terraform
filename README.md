@@ -6,6 +6,10 @@ IaC lives under [`infrastructure/`](infrastructure/) so modules can be reused ac
 Aligned with [docs/Readme-Terraform.md](docs/Readme-Terraform.md) (naming, modules, remote state, pinned providers, sensitive outputs, plan-before-apply).
 
 ## Architecture
+### Azure (resources)
+![Azure architecture · Static Web Apps multi-sitio](docs/architecture-azure.jpeg)
+
+### Delivery flow (CI/CD)
 ![Terraform multi-sitio · Azure Static Web Apps](docs/diagram.jpeg)
 
 ```text
@@ -38,7 +42,7 @@ Developer → git push → GitHub Actions
 │   ├── dev.tfvars / staging.tfvars / prod.tfvars
 │   └── backend.hcl.example
 ├── sites/                      # Static content per site
-├── docs/                       # Architecture diagram + Terraform practices
+├── docs/                       # Azure architecture + delivery diagrams
 ├── .github/workflows/
 ├── Makefile                    # Runs terraform inside infrastructure/
 └── README.md
@@ -77,7 +81,6 @@ Pattern for shared backend (no env): `tf-{project_name}-{resource}`
 Validation blocks reject Free + more than 2 `custom_domains`. Checks also fail if the active workspace does not match `var.environment`, or if you are on `default`.
 
 ## Bootstrap remote state (one-time)
-
 ```powershell
 .\infrastructure\scripts\bootstrap-backend.ps1 -ProjectName staticsites -Location eastus2
 ```
