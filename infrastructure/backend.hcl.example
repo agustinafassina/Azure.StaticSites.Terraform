@@ -1,0 +1,6 @@
+# Copy to backend.hcl (gitignored). Workspaces → env:/<ws>/<key>
+
+resource_group_name  = "tf-staticsites-tfstate-rg"
+storage_account_name = "tfstaticsitestfstate"
+container_name       = "tfstate"
+key                  = "tf-staticsites/terraform.tfstate"

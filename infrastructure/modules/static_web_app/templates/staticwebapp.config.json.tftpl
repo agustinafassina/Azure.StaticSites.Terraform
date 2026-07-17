@@ -1,0 +1,33 @@
+{
+  "routes": [
+%{ for i, r in routes ~}
+    {
+      "route": "${r.route}"
+%{ if try(r.allowedRoles, null) != null ~}
+      ,"allowedRoles": ${jsonencode(r.allowedRoles)}
+%{ endif ~}
+%{ if try(r.rewrite, null) != null ~}
+      ,"rewrite": "${r.rewrite}"
+%{ endif ~}
+%{ if try(r.redirect, null) != null ~}
+      ,"redirect": "${r.redirect}"
+%{ endif ~}
+%{ if try(r.statusCode, null) != null ~}
+      ,"statusCode": ${r.statusCode}
+%{ endif ~}
+    }%{ if i < length(routes) - 1 ~},{%{ endif ~}
+
+%{ endfor ~}
+  ]
+%{ if navigation_fallback != null ~}
+  ,"navigationFallback": {
+    "rewrite": "${navigation_fallback.rewrite}"
+%{ if length(try(navigation_fallback.exclude, [])) > 0 ~}
+    ,"exclude": ${jsonencode(navigation_fallback.exclude)}
+%{ endif ~}
+  }
+%{ endif ~}
+%{ if length(global_headers) > 0 ~}
+  ,"globalHeaders": ${jsonencode(global_headers)}
+%{ endif ~}
+}
