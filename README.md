@@ -13,22 +13,25 @@ Aligned with [docs/Readme-Terraform.md](docs/Readme-Terraform.md) (naming, modul
 ![Terraform multi-sitio · Azure Static Web Apps](docs/diagram.jpeg)
 
 ```text
-Developer → git push → GitHub Actions
-                         ├─ Stage 1: Terraform (SWA + DNS + custom domains)
-                         │            └─ Azure Storage state + blob lock
-                         │            └─ workspace = dev|staging|prod
-                         │            └─ outputs deployment_token
-                         └─ Stage 2: Build & Deploy (token → SWA)
-                                      └─ CDN + managed SSL
+Developer → git push / PR / manual run → GitHub Actions
+                         ├─ Job terraform (push to infrastructure/** or manual run)
+                         │            └─ OIDC login + Azure Storage state + blob lock
+                         │            └─ workspace = dev|prod (staging optional)
+                         │            └─ plan always; apply only on manual run
+                         │            └─ outputs deployment_tokens → stored manually as GitHub secrets
+                         ├─ Job deploy (per site, only if sites/<site>/** changed)
+                         │            └─ AZURE_STATIC_WEB_APPS_API_TOKEN_<SITE> → SWA
+                         │            └─ CDN + managed SSL (PRs get a staging environment)
+                         └─ Job close_pr (PR closed → staging environments removed)
 ```
 
 | Concept | Choice |
 |---------|--------|
 | Sites | `for_each` over a `sites` map — **1 SWA per site** |
-| Environments | **Terraform workspaces** (`dev` / `staging` / `prod`) + matching `*.tfvars` |
+| Environments | **Terraform workspaces** (`dev` / `prod`, optional `staging`) + matching `*.tfvars` |
 | State | One blob per workspace under `env:/<workspace>/tf-{project}/terraform.tfstate` |
 | Resource group | Shared per environment by default |
-| DNS | Shared zone; create once (prod) or pass existing zone |
+| DNS | Shared zone created in prod; dev runs without DNS (default `*.azurestaticapps.net` hostnames) |
 | Content | Deployed with GHA + `deployment_token` (not GitHub App linking) |
 
 ## Repository layout
@@ -39,11 +42,12 @@ Developer → git push → GitHub Actions
 │   │   └── dns_zone/
 │   ├── scripts/                # Backend bootstrap
 │   ├── main.tf / variables.tf / outputs.tf / …
-│   ├── dev.tfvars / staging.tfvars / prod.tfvars
+│   ├── dev.tfvars / prod.tfvars   # add staging.tfvars if you use that workspace
 │   └── backend.hcl.example
 ├── sites/                      # Static content per site
 ├── docs/                       # Azure architecture + delivery diagrams
 ├── .github/workflows/
+│   └── azure-static-web-apps.yml   # Terraform + content deploy pipeline
 ├── Makefile                    # Runs terraform inside infrastructure/
 └── README.md
 ```
@@ -100,10 +104,14 @@ cp infrastructure/backend.hcl.example infrastructure/backend.hcl
 ```
 
 ## Configure and apply
-1. Edit `infrastructure/dev.tfvars` (and staging/prod) — set `project_name`, `dns_zone_name`, and `sites`.
-2. Replace placeholder domains (`example.com`) with yours.
-3. Prefer **one** workspace (usually prod) with `create_dns_zone = true`; others set `create_dns_zone = false` and `existing_dns_zone_resource_group_name`.
-4. From repo root:
+1. Edit `infrastructure/dev.tfvars` and `infrastructure/prod.tfvars` — set `project_name`, `dns_zone_name`, and `sites`.
+2. Replace placeholder domains (`example.com`) in `prod.tfvars` with yours.
+3. DNS per environment:
+   - **prod** creates the shared zone (`create_dns_zone = true`) and maps custom domains.
+   - **dev** runs without DNS: `dns_zone_name = null`, `custom_domains = []` and `enable_dns_records = false` on each site. Sites are reachable on their default `*.azurestaticapps.net` hostname.
+   - To reuse an existing zone from another environment instead, set `create_dns_zone = false`, `dns_zone_name` and `existing_dns_zone_resource_group_name`.
+4. `staging` is optional: the workflow offers it, but you must create `infrastructure/staging.tfvars` before using it.
+5. From repo root:
 
 ```bash
 make fmt
@@ -130,6 +138,21 @@ Create repository secrets (never commit these):
 | `AZURE_STATIC_WEB_APPS_API_TOKEN_SITE2` | `deployment_tokens.site2` |
 | `AZURE_CLIENT_ID` / `AZURE_TENANT_ID` / `AZURE_SUBSCRIPTION_ID` | OIDC for Terraform job |
 | `TF_BACKEND_RESOURCE_GROUP` / `TF_BACKEND_STORAGE_ACCOUNT` | Backend bootstrap values |
+| `TF_BACKEND_CONTAINER` (optional) | Backend container; defaults to `tfstate` |
+
+The deploy job reads the tokens from these secrets; it does not take them from Terraform outputs. After the first `apply` of an environment (or when a token is rotated), update the secrets.
+
+## GitHub Actions workflow
+[`.github/workflows/azure-static-web-apps.yml`](.github/workflows/azure-static-web-apps.yml) runs on push and PR to `main` (paths `sites/**`, `infrastructure/**` and the workflow itself), and on manual run.
+
+| Job | When it runs | What it does |
+|-----|--------------|--------------|
+| `terraform` | Push touching `infrastructure/`, or manual run | OIDC login, writes `backend.hcl` from secrets, `init`, selects/creates the workspace, `plan`. On push it uses `dev`. |
+| `terraform` → apply | Manual run only, with `terraform_action = apply` | `terraform apply` of the saved plan |
+| `deploy` | Push / PR (not closed), or manual run | One matrix entry per site; on push/PR it skips a site whose `sites/<site>/` did not change. PRs get a staging environment. |
+| `close_pr` | PR closed | Removes the PR staging environment of each site |
+
+To apply infrastructure: **Actions → Azure Static Web Apps → Run workflow**, choose the environment and `apply`. Terraform does not run on pull requests.
 
 ## Add a new site
 1. Add a folder under `sites/<key>/` with at least `index.html` (and optional `staticwebapp.config.json`).
@@ -140,20 +163,25 @@ sites = {
   # ...existing...
   marketing = {
     display_name    = "Marketing"
-    custom_domains  = ["www.example.com"]  # max 2 on Free
+    custom_domains  = ["www.example.com"]  # max 2 on Free; [] in dev
     app_location    = "/sites/marketing"
     sku_tier        = "Free"
+    # enable_dns_records = false           # in environments without DNS (dev)
   }
 }
 ```
 
-3. Add a matrix row in [`.github/workflows/azure-static-web-apps.yml`](.github/workflows/azure-static-web-apps.yml) and a matching GitHub secret.
-4. `make plan ENV=...` → review → `make apply ENV=...`.
-5. Store the new `deployment_token` in GitHub Secrets.
+3. Update [`.github/workflows/azure-static-web-apps.yml`](.github/workflows/azure-static-web-apps.yml) (tokens are wired per site, so all three are needed):
+   - add a row to the `deploy` matrix (`site`, `app_location`, `api_location`, `output_location`);
+   - copy a **Build And Deploy (siteN)** step for the new site, pointing to its secret;
+   - add the site to the `close_pr` matrix and copy a **Close Staging Environment (siteN)** step.
+4. `make plan ENV=...` → review → `make apply ENV=...` (or run the workflow manually with `apply`).
+5. Store the new `deployment_token` as `AZURE_STATIC_WEB_APPS_API_TOKEN_<SITE>` in GitHub Secrets.
 
 ## Content vs infrastructure
-- Changes under `infrastructure/` → Terraform stage.
+- Changes under `infrastructure/` → Terraform `plan` on push (apply is manual).
 - Changes under `sites/<name>/` → deploy job for that site only.
+- Changes to the workflow file → all sites are redeployed.
 - You can update HTML/CSS/JS without re-running Terraform once the SWA exists.
 
 ## Optional Azure Functions API

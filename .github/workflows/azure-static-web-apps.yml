@@ -1,0 +1,194 @@
+name: Azure Static Web Apps
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "sites/**"
+      - "infrastructure/**"
+      - ".github/workflows/azure-static-web-apps.yml"
+  pull_request:
+    types: [opened, synchronize, reopened, closed]
+    branches: [main]
+    paths:
+      - "sites/**"
+      - "infrastructure/**"
+      - ".github/workflows/azure-static-web-apps.yml"
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Terraform workspace / tfvars to use
+        required: true
+        default: dev
+        type: choice
+        options: [dev, staging, prod]
+      terraform_action:
+        description: Terraform action
+        required: true
+        default: plan
+        type: choice
+        options: [plan, apply]
+
+permissions:
+  contents: read
+  id-token: write
+  pull-requests: write
+
+env:
+  TF_VERSION: "1.15.2"
+  ARM_USE_OIDC: true
+
+jobs:
+  # Terraform (OIDC + backend secrets)
+  terraform:
+    name: Terraform (${{ github.event.inputs.environment || 'dev' }})
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' &&
+        (contains(toJSON(github.event.commits.*.modified), 'infrastructure/') ||
+         contains(toJSON(github.event.commits.*.added), 'infrastructure/')))
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: infrastructure
+    env:
+      TF_ENV: ${{ github.event.inputs.environment || 'dev' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Write backend.hcl
+        env:
+          TF_BACKEND_RG: ${{ secrets.TF_BACKEND_RESOURCE_GROUP }}
+          TF_BACKEND_SA: ${{ secrets.TF_BACKEND_STORAGE_ACCOUNT }}
+          TF_BACKEND_CONTAINER: ${{ secrets.TF_BACKEND_CONTAINER || 'tfstate' }}
+        run: |
+          cat > backend.hcl <<EOF
+          resource_group_name  = "${TF_BACKEND_RG}"
+          storage_account_name = "${TF_BACKEND_SA}"
+          container_name       = "${TF_BACKEND_CONTAINER}"
+          key                  = "tf-staticsites/terraform.tfstate"
+          EOF
+
+      - name: Terraform Init
+        run: terraform init -backend-config=backend.hcl
+
+      - name: Select workspace
+        run: |
+          terraform workspace select "${TF_ENV}" 2>/dev/null || terraform workspace new "${TF_ENV}"
+          terraform workspace show
+
+      - name: Terraform Plan
+        run: terraform plan -var-file="${TF_ENV}.tfvars" -out=tfplan -no-color
+
+      - name: Terraform Apply
+        if: >
+          github.event_name == 'workflow_dispatch' &&
+          github.event.inputs.terraform_action == 'apply'
+        run: terraform apply -auto-approve tfplan
+
+  # Content deploy (AZURE_STATIC_WEB_APPS_API_TOKEN_*)
+  deploy:
+    name: Deploy ${{ matrix.site }}
+    if: github.event.action != 'closed'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - site: site1
+            app_location: "/sites/site1"
+            api_location: ""
+            output_location: ""
+          - site: site2
+            app_location: "/sites/site2"
+            api_location: ""
+            output_location: ""
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+          lfs: false
+
+      - name: Skip if site path unchanged (push/PR)
+        id: filter
+        if: github.event_name != 'workflow_dispatch'
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE="${{ github.event.pull_request.base.sha }}"
+            HEAD="${{ github.event.pull_request.head.sha }}"
+          else
+            BASE="${{ github.event.before }}"
+            HEAD="${{ github.sha }}"
+          fi
+          if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ]; then
+            echo "deploy=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if git diff --name-only "$BASE" "$HEAD" | grep -qE "^sites/${{ matrix.site }}/|^\.github/workflows/azure-static-web-apps\.yml$"; then
+            echo "deploy=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "deploy=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build And Deploy (site1)
+        if: >
+          matrix.site == 'site1' &&
+          (github.event_name == 'workflow_dispatch' || steps.filter.outputs.deploy == 'true')
+        uses: Azure/static-web-apps-deploy@v1
+        with:
+          azure_static_web_apps_api_token: ${{ secrets.AZURE_STATIC_WEB_APPS_API_TOKEN_SITE1 }}
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          action: "upload"
+          app_location: ${{ matrix.app_location }}
+          api_location: ${{ matrix.api_location }}
+          output_location: ${{ matrix.output_location }}
+
+      - name: Build And Deploy (site2)
+        if: >
+          matrix.site == 'site2' &&
+          (github.event_name == 'workflow_dispatch' || steps.filter.outputs.deploy == 'true')
+        uses: Azure/static-web-apps-deploy@v1
+        with:
+          azure_static_web_apps_api_token: ${{ secrets.AZURE_STATIC_WEB_APPS_API_TOKEN_SITE2 }}
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          action: "upload"
+          app_location: ${{ matrix.app_location }}
+          api_location: ${{ matrix.api_location }}
+          output_location: ${{ matrix.output_location }}
+
+  close_pr:
+    name: Close PR — ${{ matrix.site }}
+    if: github.event_name == 'pull_request' && github.event.action == 'closed'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - site: site1
+          - site: site2
+    steps:
+      - name: Close Staging Environment (site1)
+        if: matrix.site == 'site1'
+        uses: Azure/static-web-apps-deploy@v1
+        with:
+          azure_static_web_apps_api_token: ${{ secrets.AZURE_STATIC_WEB_APPS_API_TOKEN_SITE1 }}
+          action: "close"
+
+      - name: Close Staging Environment (site2)
+        if: matrix.site == 'site2'
+        uses: Azure/static-web-apps-deploy@v1
+        with:
+          azure_static_web_apps_api_token: ${{ secrets.AZURE_STATIC_WEB_APPS_API_TOKEN_SITE2 }}
+          action: "close"
